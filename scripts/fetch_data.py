@@ -1,6 +1,6 @@
 """
 fetch_data.py
-Obtiene datos de precio BTC desde Bybit (sin restricciones geo) y
+Obtiene datos de precio BTC desde OKX (sin restricciones geo) y
 liquidaciones/OI/Long-Short desde Coinglass.
 Guarda todo en output/market_data.json para el paso de análisis.
 """
@@ -18,73 +18,82 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 COINGLASS_API_KEY = os.environ.get("COINGLASS_API_KEY", "")
 
-BYBIT_BASE = "https://api.bybit.com"
-HEADERS    = {"Content-Type": "application/json"}
+OKX_BASE = "https://www.okx.com"
+HEADERS  = {"Content-Type": "application/json"}
 
 # ─────────────────────────────────────────────
-# 1. BYBIT — Precio, velas, order book, funding
+# 1. OKX — Precio, velas, order book, funding
 # ─────────────────────────────────────────────
 
 def get_btc_price() -> dict:
-    url    = f"{BYBIT_BASE}/v5/market/tickers"
-    params = {"category": "linear", "symbol": "BTCUSDT"}
+    """Ticker 24h de BTC-USDT-SWAP en OKX."""
+    url    = f"{OKX_BASE}/api/v5/market/ticker"
+    params = {"instId": "BTC-USDT-SWAP"}
     r = requests.get(url, params=params, headers=HEADERS, timeout=10)
     r.raise_for_status()
-    d = r.json()["result"]["list"][0]
+    d = r.json()["data"][0]
+    last  = float(d["last"])
+    open_ = float(d["open24h"])
     return {
-        "price":        float(d["lastPrice"]),
-        "price_change": float(d["price24hPcnt"]) * 100,
-        "high_24h":     float(d["highPrice24h"]),
-        "low_24h":      float(d["lowPrice24h"]),
-        "volume_24h":   float(d["turnover24h"]),
+        "price":        last,
+        "price_change": round((last - open_) / open_ * 100, 4),
+        "high_24h":     float(d["high24h"]),
+        "low_24h":      float(d["low24h"]),
+        "volume_24h":   float(d["volCcy24h"]),  # en USDT
     }
 
 
-def get_ohlcv(interval: str = "240", limit: int = 50) -> list:
-    url    = f"{BYBIT_BASE}/v5/market/kline"
-    params = {"category": "linear", "symbol": "BTCUSDT",
-              "interval": interval, "limit": limit}
+def get_ohlcv(bar: str = "4H", limit: int = 50) -> list:
+    """
+    Velas OHLCV de BTC-USDT-SWAP en OKX.
+    bar: "1H", "4H", "1D"
+    """
+    url    = f"{OKX_BASE}/api/v5/market/candles"
+    params = {"instId": "BTC-USDT-SWAP", "bar": bar, "limit": limit}
     r = requests.get(url, params=params, headers=HEADERS, timeout=10)
     r.raise_for_status()
-    raw = r.json()["result"]["list"]
+    raw = r.json()["data"]
     candles = []
-    for k in reversed(raw):
+    for k in reversed(raw):   # OKX devuelve de más reciente a más antiguo
         candles.append({
             "open_time": datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).isoformat(),
-            "open":  float(k[1]),
-            "high":  float(k[2]),
-            "low":   float(k[3]),
-            "close": float(k[4]),
-            "volume":float(k[5]),
+            "open":   float(k[1]),
+            "high":   float(k[2]),
+            "low":    float(k[3]),
+            "close":  float(k[4]),
+            "volume": float(k[5]),
         })
     return candles
 
 
 def get_order_book() -> dict:
-    url    = f"{BYBIT_BASE}/v5/market/orderbook"
-    params = {"category": "linear", "symbol": "BTCUSDT", "limit": 10}
+    """Top 10 bids/asks de BTC-USDT-SWAP."""
+    url    = f"{OKX_BASE}/api/v5/market/books"
+    params = {"instId": "BTC-USDT-SWAP", "sz": 10}
     r = requests.get(url, params=params, headers=HEADERS, timeout=10)
     r.raise_for_status()
-    d = r.json()["result"]
+    d = r.json()["data"][0]
     return {
-        "bids": [[float(p), float(q)] for p, q in d["b"]],
-        "asks": [[float(p), float(q)] for p, q in d["a"]],
+        "bids": [[float(p[0]), float(p[1])] for p in d["bids"]],
+        "asks": [[float(p[0]), float(p[1])] for p in d["asks"]],
     }
 
 
 def get_funding_rate() -> dict:
-    url    = f"{BYBIT_BASE}/v5/market/tickers"
-    params = {"category": "linear", "symbol": "BTCUSDT"}
+    """Funding rate actual e histórico de BTC-USDT-SWAP en OKX."""
+    # Actual
+    url    = f"{OKX_BASE}/api/v5/public/funding-rate"
+    params = {"instId": "BTC-USDT-SWAP"}
     r = requests.get(url, params=params, headers=HEADERS, timeout=10)
     r.raise_for_status()
-    ticker  = r.json()["result"]["list"][0]
-    current = float(ticker.get("fundingRate", 0))
+    current = float(r.json()["data"][0]["fundingRate"])
 
-    url2    = f"{BYBIT_BASE}/v5/market/funding/history"
-    params2 = {"category": "linear", "symbol": "BTCUSDT", "limit": 3}
+    # Histórico (últimas 3)
+    url2    = f"{OKX_BASE}/api/v5/public/funding-rate-history"
+    params2 = {"instId": "BTC-USDT-SWAP", "limit": 3}
     r2 = requests.get(url2, params=params2, headers=HEADERS, timeout=10)
     r2.raise_for_status()
-    history = [float(x["fundingRate"]) for x in r2.json()["result"]["list"]]
+    history = [float(x["fundingRate"]) for x in r2.json()["data"]]
 
     return {
         "current_funding_rate": current,
@@ -178,28 +187,28 @@ def main():
     timestamp   = datetime.now(tz=timezone.utc).isoformat()
     market_data = {
         "fetched_at":     timestamp,
-        "symbol":         "BTCUSDT",
-        "source":         "Bybit",
-        "timeframe_main": "4h",
+        "symbol":         "BTC-USDT-SWAP",
+        "source":         "OKX",
+        "timeframe_main": "4H",
     }
 
-    print("  → Precio BTC (Bybit)…")
+    print("  → Precio BTC (OKX)…")
     market_data["price_ticker"] = get_btc_price()
     time.sleep(0.3)
 
-    print("  → Velas 4h (Bybit)…")
-    market_data["ohlcv_4h"] = get_ohlcv("240", 50)
+    print("  → Velas 4H (OKX)…")
+    market_data["ohlcv_4h"] = get_ohlcv("4H", 50)
     time.sleep(0.3)
 
-    print("  → Velas 1h (Bybit)…")
-    market_data["ohlcv_1h"] = get_ohlcv("60", 24)
+    print("  → Velas 1H (OKX)…")
+    market_data["ohlcv_1h"] = get_ohlcv("1H", 24)
     time.sleep(0.3)
 
-    print("  → Order book (Bybit)…")
+    print("  → Order book (OKX)…")
     market_data["order_book"] = get_order_book()
     time.sleep(0.3)
 
-    print("  → Funding rate (Bybit)…")
+    print("  → Funding rate (OKX)…")
     market_data["funding"] = get_funding_rate()
     time.sleep(0.3)
 
